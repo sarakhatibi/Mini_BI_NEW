@@ -1,6 +1,15 @@
 # app_css_inject.py
 import streamlit as st
 
+RTL_CSS = """<style>
+/* Right-to-left layout for the Persian interface */
+.stApp, .block-container, section[data-testid="stSidebar"] { direction: rtl; }
+.stApp h1, .stApp h2, .stApp h3, .stApp h4, .stApp p, .stApp label { text-align: right; }
+[data-testid="stMetricValue"], [data-testid="stMetricLabel"] { direction: ltr; text-align: right; }
+[data-testid="stDataFrame"] { direction: ltr; }
+</style>"""
+
+
 def inject_style(theme: str = "muted"):
     """
     theme: "muted" | "vibrant" | "dark"
@@ -58,4 +67,4 @@ def inject_style(theme: str = "muted"):
 <div class="blob two" aria-hidden="true"></div>
 <div class="blob three" aria-hidden="true"></div>
 """
-    st.markdown(css, unsafe_allow_html=True)
+    st.markdown(RTL_CSS + css, unsafe_allow_html=True)

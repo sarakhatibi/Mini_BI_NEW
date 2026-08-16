@@ -1,409 +1,210 @@
+"""Management insights: turn the numbers into short, actionable sentences.
+
+Insights are generated from the dataset profile and the KPI context, so a
+sentence only appears when the underlying data supports it.
+"""
+
+from dataclasses import dataclass
+
 import pandas as pd
 
+from services.kpi_engine import KpiResult, calculate_kpis
+from services.semantic_profiler import DatasetProfile, profile_dataset
 
-def _find_column(columns, candidates):
-    """
-    Find the first matching column from candidate names.
+CONCENTRATION_WARNING = 30.0
+HIGH_DISCOUNT = 15.0
+OUTLIER_RATIO = 5.0
 
-    Matching is case-insensitive and ignores
-    leading/trailing spaces.
-    """
 
-    normalized = {
-        str(column).strip().lower(): column
-        for column in columns
-    }
+@dataclass
+class Insight:
+    """A management level takeaway."""
 
-    for candidate in candidates:
+    text: str
+    level: str = "info"  # info | positive | warning
+    evidence: str = ""
 
-        key = (
-            str(candidate)
-            .strip()
-            .lower()
+
+def _money(value: float) -> str:
+    return f"${value:,.0f}" if abs(value) >= 1000 else f"${value:,.2f}"
+
+
+def _numeric(df: pd.DataFrame, column: str) -> pd.Series:
+    return pd.to_numeric(df[column], errors="coerce")
+
+
+def _trend_insight(monthly: pd.Series, partial: bool = False) -> list:
+    insights = []
+    if monthly is None or len(monthly) < 2:
+        return insights
+
+    last, previous = monthly.iloc[-1], monthly.iloc[-2]
+    if previous:
+        change = (last - previous) / abs(previous) * 100
+        level = "positive" if change >= 0 else "warning"
+        direction = "رشد" if change >= 0 else "افت"
+        note = " ماه جاری هنوز کامل نشده و در این مقایسه لحاظ نشده است." if partial else ""
+        insights.append(
+            Insight(
+                f"فروش در {monthly.index[-1]} نسبت به ماه قبل "
+                f"{abs(change):,.1f}٪ {direction} داشته است.{note}",
+                level,
+                f"{_money(float(previous))} → {_money(float(last))}",
+            )
         )
 
-        if key in normalized:
-            return normalized[key]
-
-    return None
-
-
-def _safe_numeric(series):
-    """
-    Safely convert a Series to numeric values.
-
-    Invalid values become NaN.
-    """
-
-    return pd.to_numeric(
-        series,
-        errors="coerce"
+    best_month = monthly.idxmax()
+    worst_month = monthly.idxmin()
+    insights.append(
+        Insight(
+            f"بهترین ماه {best_month} با {_money(float(monthly.max()))} و ضعیف‌ترین ماه "
+            f"{worst_month} با {_money(float(monthly.min()))} بوده است.",
+            "info",
+        )
     )
+    return insights
 
 
-def _is_valid_number(value):
-    """
-    Check whether a value is a valid finite number.
-    """
+def generate_insights(df: pd.DataFrame, kpi_result: KpiResult = None,
+                      profile: DatasetProfile = None) -> list:
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return []
 
-    if value is None:
-        return False
-
-    if pd.isna(value):
-        return False
-
-    return (
-        pd.api.types.is_number(value)
-        and pd.api.types.is_float(value)
-        or pd.api.types.is_integer(value)
-    )
-
-
-def generate_insights(df, kpis):
+    if profile is None:
+        profile = profile_dataset(df)
+    if kpi_result is None:
+        kpi_result = calculate_kpis(df, profile)
 
     insights = []
+    context = kpi_result.context
+    money_column = profile.money_column
 
-    # ==================================================
-    # 0. BASIC VALIDATION
-    # ==================================================
-
-    if df is None:
-        return insights
-
-    if not isinstance(
-        df,
-        pd.DataFrame
-    ):
-        return insights
-
-    if df.empty:
-        return insights
-
-    if kpis is None:
-        kpis = {}
-
-    # ==================================================
-    # 1. SALES INSIGHT
-    # ==================================================
-
-    if "total_sales" in kpis:
-
-        total_sales = kpis[
-            "total_sales"
-        ]
-
-        if _is_valid_number(
-            total_sales
-        ):
-
-            insights.append(
-                f"Total sales are "
-                f"${total_sales:,.2f}."
-            )
-
-    # ==================================================
-    # 2. QUANTITY INSIGHT
-    # ==================================================
-
-    if "total_quantity" in kpis:
-
-        total_quantity = kpis[
-            "total_quantity"
-        ]
-
-        if _is_valid_number(
-            total_quantity
-        ):
-
-            insights.append(
-                f"Total quantity sold is "
-                f"{total_quantity:,.0f}."
-            )
-
-    # ==================================================
-    # 3. AVERAGE ORDER VALUE
-    # ==================================================
-
-    if "average_order_value" in kpis:
-
-        average_order = kpis[
-            "average_order_value"
-        ]
-
-        if _is_valid_number(
-            average_order
-        ):
-
-            insights.append(
-                f"Average order value is "
-                f"${average_order:,.2f}."
-            )
-
-    # ==================================================
-    # 4. FIND SALES COLUMN
-    # ==================================================
-
-    sales_column = kpis.get(
-        "sales_column"
-    )
-
-    if sales_column is None:
-
-        sales_column = _find_column(
-            df.columns,
-            [
-                "Total_Amount_USD",
-                "Total_Amount",
-                "Sales",
-                "Revenue"
-            ]
+    total_sales = kpi_result.get("total_sales")
+    if total_sales:
+        order_count = kpi_result.get("order_count")
+        suffix = f" در {order_count.display} سفارش" if order_count else ""
+        insights.append(
+            Insight(f"فروش خالص دوره {total_sales.display} است{suffix}.", "info")
         )
 
-    # ==================================================
-    # 5. HIGHEST TRANSACTION
-    # ==================================================
+    insights.extend(
+        _trend_insight(
+            context.get("comparable_monthly_sales", context.get("monthly_sales")),
+            bool(context.get("partial_last_month")),
+        )
+    )
 
-    if (
-        sales_column
-        and sales_column in df.columns
-    ):
+    # Concentration risk -------------------------------------------------
+    for key, label in (("best_customer", "مشتری"), ("best_product", "محصول")):
+        kpi = kpi_result.get(key)
+        share = context.get(f"{key}_share")
+        if not kpi or share is None:
+            continue
+        level = "warning" if share >= CONCENTRATION_WARNING else "info"
+        message = (
+            f"{label} «{kpi.display}» با {_money(kpi.value)} معادل {share:,.1f}٪ از فروش را تشکیل می‌دهد."
+        )
+        if level == "warning":
+            message += " وابستگی درآمد به این یک مورد ریسک محسوب می‌شود."
+        insights.append(Insight(message, level))
 
-        sales = _safe_numeric(
-            df[sales_column]
-        ).dropna()
+    # Cancellation / returns ---------------------------------------------
+    cancellation = kpi_result.get("cancellation_rate")
+    cancelled_value = kpi_result.get("cancelled_value")
+    if cancellation:
+        level = "warning" if cancellation.value >= 5 else "info"
+        evidence = cancelled_value.display if cancelled_value else ""
+        insights.append(
+            Insight(
+                f"{cancellation.display} از رکوردها لغو یا مرجوع شده‌اند و از فروش خالص کنار گذاشته شدند.",
+                level,
+                evidence,
+            )
+        )
 
-        if not sales.empty:
+    # Receivables ----------------------------------------------------------
+    pending = kpi_result.get("pending_amount")
+    if pending:
+        message = f"{pending.display} از فروش هنوز وصول نشده است."
+        payment_days = next(
+            (
+                column
+                for column in profile.measure_columns
+                if "day" in str(column).lower() or "روز" in str(column)
+            ),
+            "",
+        )
+        if payment_days:
+            average_days = float(_numeric(df, payment_days).mean())
+            message += f" میانگین دوره پرداخت {average_days:,.0f} روز است."
+        insights.append(Insight(message, "warning"))
 
-            highest = sales.max()
+    # Discount pressure -----------------------------------------------------
+    discount_column = next(
+        (column for column in profile.percent_columns if "discount" in str(column).lower()
+         or "تخفیف" in str(column)),
+        "",
+    )
+    if discount_column and money_column:
+        discounts = _numeric(df, discount_column)
+        average_discount = float(discounts.mean())
+        if pd.notna(average_discount) and average_discount > 0:
+            high = df[discounts >= HIGH_DISCOUNT]
+            level = "warning" if average_discount >= HIGH_DISCOUNT / 2 else "info"
+            message = f"میانگین تخفیف {average_discount:,.1f}٪ است."
+            if not high.empty:
+                message += (
+                    f" تعداد سفارش با تخفیف {HIGH_DISCOUNT:.0f}٪ یا بیشتر: {len(high):,}"
+                )
+            insights.append(Insight(message, level))
 
-            if pd.notna(highest):
-
+    # Outliers ---------------------------------------------------------------
+    if money_column:
+        values = _numeric(df, money_column).dropna()
+        if not values.empty:
+            average = float(values.mean())
+            largest = float(values.max())
+            if average > 0 and largest / average >= OUTLIER_RATIO:
                 insights.append(
-                    f"The highest individual "
-                    f"transaction is "
-                    f"${highest:,.2f}."
-                )
-
-                # --------------------------------
-                # Compare highest with average
-                # --------------------------------
-
-                average = sales.mean()
-
-                if (
-                    pd.notna(average)
-                    and average > 0
-                ):
-
-                    ratio = (
-                        highest / average
+                    Insight(
+                        f"بزرگ‌ترین سفارش ({_money(largest)}) بیش از {largest / average:,.1f} برابر "
+                        "میانگین است؛ پیش از تصمیم‌گیری صحت آن بررسی شود.",
+                        "warning",
                     )
-
-                    if ratio >= 3:
-
-                        insights.append(
-                            "The highest transaction is "
-                            "significantly above the "
-                            "average order value."
-                        )
-
-    # ==================================================
-    # 6. TOP CATEGORY
-    # ==================================================
-
-    category_column = _find_column(
-        df.columns,
-        [
-            "Category",
-            "Region",
-            "Product",
-            "Product_Name"
-        ]
-    )
-
-    if (
-        category_column
-        and sales_column
-        and sales_column in df.columns
-    ):
-
-        category_data = df[
-            [
-                category_column,
-                sales_column
-            ]
-        ].copy()
-
-        category_data[
-            sales_column
-        ] = _safe_numeric(
-            category_data[
-                sales_column
-            ]
-        )
-
-        category_data[
-            category_column
-        ] = (
-            category_data[
-                category_column
-            ]
-            .astype(str)
-            .str.strip()
-        )
-
-        category_data = category_data[
-            category_data[
-                category_column
-            ].ne("")
-        ]
-
-        category_data = (
-            category_data
-            .dropna(
-                subset=[
-                    sales_column
-                ]
-            )
-        )
-
-        if not category_data.empty:
-
-            grouped = (
-                category_data
-                .groupby(
-                    category_column
-                )[sales_column]
-                .sum()
-                .sort_values(
-                    ascending=False
                 )
-            )
-
-            if not grouped.empty:
-
-                top_category = (
-                    grouped.index[0]
-                )
-
-                top_sales = (
-                    grouped.iloc[0]
-                )
-
-                if pd.notna(
-                    top_sales
-                ):
-
-                    insights.append(
-                        f"The highest sales "
-                        f"contribution comes from "
-                        f"{category_column} "
-                        f"'{top_category}', with "
-                        f"${top_sales:,.2f} in sales."
+            negatives = int((values < 0).sum())
+            if negatives:
+                insights.append(
+                    Insight(
+                        f"{negatives:,} رکورد مبلغ منفی دارد که معمولاً نشانه برگشت از فروش یا خطای ثبت است.",
+                        "warning",
                     )
+                )
 
-    # ==================================================
-    # 7. TOP CUSTOMER
-    # ==================================================
-
-    customer_column = _find_column(
-        df.columns,
-        [
-            "Customer",
-            "Customer_Name",
-            "Client",
-            "Client_Name"
-        ]
-    )
-
-    if (
-        customer_column
-        and sales_column
-        and sales_column in df.columns
-    ):
-
-        customer_data = df[
-            [
-                customer_column,
-                sales_column
-            ]
-        ].copy()
-
-        customer_data[
-            sales_column
-        ] = _safe_numeric(
-            customer_data[
-                sales_column
-            ]
+    # Region / channel opportunity --------------------------------------------
+    if money_column and profile.region_column:
+        # Regional comparison should ignore cancelled/returned rows, like the KPIs.
+        active = context.get("active_rows")
+        if not isinstance(active, pd.DataFrame) or active.empty:
+            active = df
+        grouped = (
+            active.assign(_value=_numeric(active, money_column))
+            .dropna(subset=["_value"])
+            .groupby(profile.region_column)["_value"]
+            .sum()
+            .sort_values(ascending=False)
         )
-
-        customer_data[
-            customer_column
-        ] = (
-            customer_data[
-                customer_column
-            ]
-            .astype(str)
-            .str.strip()
-        )
-
-        customer_data = customer_data[
-            customer_data[
-                customer_column
-            ].ne("")
-        ]
-
-        customer_data = (
-            customer_data
-            .dropna(
-                subset=[
-                    sales_column
-                ]
-            )
-        )
-
-        if not customer_data.empty:
-
-            customer_sales = (
-                customer_data
-                .groupby(
-                    customer_column
-                )[sales_column]
-                .sum()
-                .sort_values(
-                    ascending=False
+        if len(grouped) >= 2:
+            insights.append(
+                Insight(
+                    f"بیشترین فروش از «{grouped.index[0]}» ({_money(float(grouped.iloc[0]))}) و "
+                    f"کمترین از «{grouped.index[-1]}» ({_money(float(grouped.iloc[-1]))}) به دست آمده است.",
+                    "info",
                 )
             )
-
-            if not customer_sales.empty:
-
-                top_customer = (
-                    customer_sales.index[0]
-                )
-
-                top_customer_sales = (
-                    customer_sales.iloc[0]
-                )
-
-                if pd.notna(
-                    top_customer_sales
-                ):
-
-                    insights.append(
-                        f"The highest-value "
-                        f"customer is "
-                        f"'{top_customer}', "
-                        f"generating "
-                        f"${top_customer_sales:,.2f}."
-                    )
-
-    # ==================================================
-    # 8. DATASET SIZE
-    # ==================================================
 
     insights.append(
-        f"The current analysis is based "
-        f"on {len(df):,} records."
+        Insight(f"این تحلیل بر پایه {len(df):,} رکورد پس از پاک‌سازی و فیلترهای فعال است.", "info")
     )
 
     return insights

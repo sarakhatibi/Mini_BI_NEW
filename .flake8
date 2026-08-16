@@ -1,0 +1,5 @@
+[flake8]
+max-line-length = 110
+exclude = .git,__pycache__,.pytest_cache
+per-file-ignores =
+    app_css_inject.py:E501,W292

@@ -1,469 +1,246 @@
+"""Automatic visualization selection based on the dataset profile."""
+
+from dataclasses import dataclass
+
 import pandas as pd
 import plotly.express as px
 
+from services.semantic_profiler import DatasetProfile, profile_dataset
 
-def _get_numeric_columns(df):
-    """
-    Return columns that contain numeric data.
-    """
-
-    return df.select_dtypes(
-        include="number"
-    ).columns.tolist()
+TOP_N = 10
+MAX_DONUT_SLICES = 8
 
 
-def _get_text_columns(df):
-    """
-    Return categorical/text columns.
-    """
+@dataclass
+class ChartSpec:
+    """A chart together with the reason it was chosen."""
 
-    text_columns = []
-
-    for column in df.columns:
-
-        series = df[column]
-
-        if (
-            pd.api.types.is_object_dtype(series)
-            or pd.api.types.is_string_dtype(series)
-            or isinstance(
-                series.dtype,
-                pd.CategoricalDtype
-            )
-        ):
-            text_columns.append(column)
-
-    return text_columns
+    key: str
+    title: str
+    description: str
+    figure: object
 
 
-def _get_date_columns(df):
-    """
-    Detect datetime columns and columns whose names
-    indicate date information.
-    """
-
-    date_columns = []
-
-    for column in df.columns:
-
-        series = df[column]
-
-        if pd.api.types.is_datetime64_any_dtype(series):
-
-            date_columns.append(column)
-
-            continue
-
-        if "date" in str(column).lower():
-
-            converted = pd.to_datetime(
-                series,
-                errors="coerce"
-            )
-
-            if converted.notna().mean() >= 0.8:
-
-                date_columns.append(column)
-
-    return date_columns
+def _numeric(df: pd.DataFrame, column: str) -> pd.Series:
+    return pd.to_numeric(df[column], errors="coerce")
 
 
-def create_charts(df):
+def _active_rows(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
+    if not profile.status_column or not profile.negative_statuses:
+        return df
+    return df[~df[profile.status_column].isin(profile.negative_statuses)]
 
+
+def _style(figure):
+    figure.update_layout(
+        margin=dict(l=10, r=10, t=60, b=10),
+        title_x=0.5,
+        legend_title_text="",
+        hoverlabel=dict(namelength=-1),
+    )
+    return figure
+
+
+def _trend_chart(df: pd.DataFrame, profile: DatasetProfile, measure: str):
+    date_column = profile.primary_date
+    frame = pd.DataFrame(
+        {
+            "date": pd.to_datetime(df[date_column], errors="coerce"),
+            "value": _numeric(df, measure),
+        }
+    ).dropna()
+
+    if frame.empty:
+        return None
+
+    span_days = (frame["date"].max() - frame["date"].min()).days
+    if span_days > 730:
+        rule, label = "QS", "فصل"
+    elif span_days > 90:
+        rule, label = "MS", "ماه"
+    elif span_days > 14:
+        rule, label = "W", "هفته"
+    else:
+        rule, label = "D", "روز"
+
+    grouped = frame.set_index("date").resample(rule)["value"].sum().reset_index()
+    if len(grouped) < 2:
+        return None
+
+    figure = px.line(
+        grouped,
+        x="date",
+        y="value",
+        markers=True,
+        title=f"روند {measure} بر حسب {label}",
+        labels={"date": "زمان", "value": measure},
+    )
+    figure.update_traces(line=dict(width=3))
+    return ChartSpec(
+        "trend",
+        f"روند {measure}",
+        f"مجموع {measure} در هر {label}؛ برای دیدن رشد یا افت در طول زمان.",
+        _style(figure),
+    )
+
+
+def _top_categories_chart(df: pd.DataFrame, dimension: str, measure: str):
+    grouped = (
+        df.assign(_value=_numeric(df, measure))
+        .dropna(subset=["_value"])
+        .groupby(dimension, as_index=False)["_value"]
+        .sum()
+        .sort_values("_value", ascending=False)
+        .head(TOP_N)
+    )
+    if grouped.empty:
+        return None
+
+    figure = px.bar(
+        grouped.sort_values("_value"),
+        x="_value",
+        y=dimension,
+        orientation="h",
+        text_auto=".2s",
+        title=f"{TOP_N} مورد برتر بر اساس {measure} در {dimension}",
+        labels={"_value": measure, dimension: dimension},
+    )
+    return ChartSpec(
+        f"top_{dimension}",
+        f"برترین‌های {dimension}",
+        f"سهم هر {dimension} از {measure}؛ برای شناسایی تمرکز فروش.",
+        _style(figure),
+    )
+
+
+def _share_chart(df: pd.DataFrame, dimension: str, measure: str):
+    grouped = (
+        df.assign(_value=_numeric(df, measure))
+        .dropna(subset=["_value"])
+        .groupby(dimension, as_index=False)["_value"]
+        .sum()
+        .sort_values("_value", ascending=False)
+    )
+    grouped = grouped[grouped["_value"] > 0]
+    if grouped.empty or len(grouped) < 2:
+        return None
+
+    if len(grouped) > MAX_DONUT_SLICES:
+        head = grouped.head(MAX_DONUT_SLICES - 1)
+        others = pd.DataFrame(
+            {dimension: ["سایر"], "_value": [grouped["_value"][MAX_DONUT_SLICES - 1:].sum()]}
+        )
+        grouped = pd.concat([head, others], ignore_index=True)
+
+    figure = px.pie(
+        grouped,
+        names=dimension,
+        values="_value",
+        hole=0.45,
+        title=f"سهم {dimension} از {measure}",
+    )
+    figure.update_traces(textposition="inside", textinfo="percent+label")
+    return ChartSpec(
+        f"share_{dimension}",
+        f"سهم {dimension}",
+        f"درصد مشارکت هر {dimension} در {measure}.",
+        _style(figure),
+    )
+
+
+def _distribution_chart(df: pd.DataFrame, measure: str):
+    values = _numeric(df, measure).dropna()
+    if values.empty or values.nunique() < 5:
+        return None
+
+    figure = px.histogram(
+        values.to_frame(measure),
+        x=measure,
+        nbins=40,
+        title=f"توزیع {measure}",
+    )
+    return ChartSpec(
+        "distribution",
+        f"توزیع {measure}",
+        "پراکندگی مقادیر؛ برای تشخیص سفارش‌های خیلی بزرگ یا خیلی کوچک.",
+        _style(figure),
+    )
+
+
+def _status_chart(df: pd.DataFrame, profile: DatasetProfile):
+    column = profile.status_column
+    counts = df[column].dropna().value_counts().reset_index()
+    counts.columns = [column, "count"]
+    if counts.empty:
+        return None
+
+    figure = px.bar(
+        counts,
+        x=column,
+        y="count",
+        text_auto=True,
+        title=f"تعداد رکورد در هر {column}",
+        labels={"count": "تعداد رکورد"},
+    )
+    return ChartSpec(
+        "status",
+        f"وضعیت {column}",
+        "ترکیب وضعیت سفارش‌ها؛ سهم لغو و مرجوعی را نشان می‌دهد.",
+        _style(figure),
+    )
+
+
+def create_charts(df: pd.DataFrame, profile: DatasetProfile = None) -> list:
+    """Choose a small set of charts that match the meaning of the data."""
+    if df is None or not isinstance(df, pd.DataFrame) or df.empty:
+        return []
+
+    if profile is None:
+        profile = profile_dataset(df)
+
+    measure = profile.primary_measure
+    if not measure:
+        return []
+
+    active = _active_rows(df, profile)
     charts = []
 
-    # --------------------------------
-    # Empty dataset
-    # --------------------------------
-
-    if df is None or df.empty:
-
-        return charts
-
-    # --------------------------------
-    # Detect column types
-    # --------------------------------
-
-    numeric_columns = _get_numeric_columns(df)
-
-    text_columns = _get_text_columns(df)
-
-    date_columns = _get_date_columns(df)
-
-    # ==================================================
-    # 1. BAR CHART
-    # ==================================================
-
-    if text_columns and numeric_columns:
-
-        category = None
-
-        value = None
-
-        # --------------------------------
-        # Prefer meaningful business categories
-        # --------------------------------
-
-        preferred_categories = [
-            "Region",
-            "Category",
-            "Product",
-            "Product_Name",
-            "Customer",
-            "Customer_Name"
-        ]
-
-        for candidate in preferred_categories:
-
-            for column in text_columns:
-
-                if column.lower() == candidate.lower():
-
-                    category = column
-
-                    break
-
-            if category:
-
-                break
-
-        if category is None:
-
-            category = text_columns[0]
-
-        # --------------------------------
-        # Prefer meaningful numeric measures
-        # --------------------------------
-
-        preferred_values = [
-            "Total_Amount_USD",
-            "Total_Amount",
-            "Sales",
-            "Revenue",
-            "Quantity"
-        ]
-
-        for candidate in preferred_values:
-
-            for column in numeric_columns:
-
-                if column.lower() == candidate.lower():
-
-                    value = column
-
-                    break
-
-            if value:
-
-                break
-
-        if value is None:
-
-            value = numeric_columns[0]
-
-        # --------------------------------
-        # Prepare chart data
-        # --------------------------------
-
-        chart_data = (
-            df[[category, value]]
-            .dropna()
-            .groupby(
-                category,
-                as_index=False
-            )[value]
-            .sum()
-            .sort_values(
-                value,
-                ascending=False
-            )
-            .head(10)
-        )
-
-        if not chart_data.empty:
-
-            fig = px.bar(
-                chart_data,
-                x=category,
-                y=value,
-                title=f"{value} by {category}",
-                labels={
-                    category: category,
-                    value: value
-                }
-            )
-
-            charts.append(fig)
-
-    # ==================================================
-    # 2. HISTOGRAM
-    # ==================================================
-
-    if numeric_columns:
-
-        histogram_column = None
-
-        preferred_histogram_columns = [
-            "Total_Amount_USD",
-            "Total_Amount",
-            "Sales",
-            "Revenue",
-            "Quantity"
-        ]
-
-        for candidate in preferred_histogram_columns:
-
-            for column in numeric_columns:
-
-                if column.lower() == candidate.lower():
-
-                    histogram_column = column
-
-                    break
-
-            if histogram_column:
-
-                break
-
-        if histogram_column is None:
-
-            histogram_column = numeric_columns[0]
-
-        histogram_data = df[
-            histogram_column
-        ].dropna()
-
-        if not histogram_data.empty:
-
-            fig = px.histogram(
-                df,
-                x=histogram_column,
-                title=(
-                    f"Distribution of "
-                    f"{histogram_column}"
-                ),
-                nbins=30
-            )
-
-            charts.append(fig)
-
-    # ==================================================
-    # 3. LINE CHART
-    # ==================================================
-
-    if date_columns and numeric_columns:
-
-        date_column = date_columns[0]
-
-        value_column = None
-
-        preferred_values = [
-            "Total_Amount_USD",
-            "Total_Amount",
-            "Sales",
-            "Revenue",
-            "Quantity"
-        ]
-
-        for candidate in preferred_values:
-
-            for column in numeric_columns:
-
-                if column.lower() == candidate.lower():
-
-                    value_column = column
-
-                    break
-
-            if value_column:
-
-                break
-
-        if value_column is None:
-
-            value_column = numeric_columns[0]
-
-        line_data = df[
-            [date_column, value_column]
-        ].copy()
-
-        # --------------------------------
-        # Safe date conversion
-        # --------------------------------
-
-        line_data[date_column] = pd.to_datetime(
-            line_data[date_column],
-            errors="coerce"
-        )
-
-        # --------------------------------
-        # Safe numeric conversion
-        # --------------------------------
-
-        line_data[value_column] = pd.to_numeric(
-            line_data[value_column],
-            errors="coerce"
-        )
-
-        line_data = line_data.dropna()
-
-        if not line_data.empty:
-
-            line_data = (
-                line_data
-                .groupby(
-                    date_column,
-                    as_index=False
-                )[value_column]
-                .sum()
-                .sort_values(
-                    date_column
-                )
-            )
-
-            if not line_data.empty:
-
-                fig = px.line(
-                    line_data,
-                    x=date_column,
-                    y=value_column,
-                    title=(
-                        f"{value_column} "
-                        "over time"
-                    ),
-                    markers=True
-                )
-
-                charts.append(fig)
-
-    # ==================================================
-    # 4. SCATTER PLOT
-    # ==================================================
-
-    if len(numeric_columns) >= 2:
-
-        x_column = None
-
-        y_column = None
-
-        # --------------------------------
-        # Prefer business-related X values
-        # --------------------------------
-
-        preferred_x = [
-            "Quantity",
-            "Qty",
-            "Units",
-            "Unit_Price_USD",
-            "Unit_Price"
-        ]
-
-        # --------------------------------
-        # Prefer business-related Y values
-        # --------------------------------
-
-        preferred_y = [
-            "Total_Amount_USD",
-            "Total_Amount",
-            "Sales",
-            "Revenue"
-        ]
-
-        # --------------------------------
-        # Find X column
-        # --------------------------------
-
-        for candidate in preferred_x:
-
-            for column in numeric_columns:
-
-                if column.lower() == candidate.lower():
-
-                    x_column = column
-
-                    break
-
-            if x_column:
-
-                break
-
-        # --------------------------------
-        # Find Y column
-        # --------------------------------
-
-        for candidate in preferred_y:
-
-            for column in numeric_columns:
-
-                if column.lower() == candidate.lower():
-
-                    y_column = column
-
-                    break
-
-            if y_column:
-
-                break
-
-        # --------------------------------
-        # Fallback X
-        # --------------------------------
-
-        if x_column is None:
-
-            x_column = numeric_columns[0]
-
-        # --------------------------------
-        # Fallback Y
-        # --------------------------------
-
-        if y_column is None:
-
-            for column in numeric_columns:
-
-                if column != x_column:
-
-                    y_column = column
-
-                    break
-
-        # --------------------------------
-        # Create scatter data
-        # --------------------------------
-
-        if y_column:
-
-            scatter_data = df[
-                [x_column, y_column]
-            ].copy()
-
-            scatter_data[x_column] = pd.to_numeric(
-                scatter_data[x_column],
-                errors="coerce"
-            )
-
-            scatter_data[y_column] = pd.to_numeric(
-                scatter_data[y_column],
-                errors="coerce"
-            )
-
-            scatter_data = (
-                scatter_data
-                .dropna()
-            )
-
-            if not scatter_data.empty:
-
-                fig = px.scatter(
-                    scatter_data,
-                    x=x_column,
-                    y=y_column,
-                    title=(
-                        f"{y_column} "
-                        f"vs {x_column}"
-                    )
-                )
-
-                charts.append(fig)
+    if profile.primary_date:
+        chart = _trend_chart(active, profile, measure)
+        if chart:
+            charts.append(chart)
+
+    dimensions = [
+        column
+        for column in profile.dimension_candidates()
+        if column != profile.status_column
+    ]
+
+    for dimension in dimensions[:2]:
+        chart = _top_categories_chart(active, dimension, measure)
+        if chart:
+            charts.append(chart)
+
+    share_dimension = next(
+        (
+            column
+            for column in dimensions
+            if 1 < df[column].dropna().nunique() <= 12
+        ),
+        None,
+    )
+    if share_dimension:
+        chart = _share_chart(active, share_dimension, measure)
+        if chart:
+            charts.append(chart)
+
+    if profile.status_column:
+        chart = _status_chart(df, profile)
+        if chart:
+            charts.append(chart)
+
+    chart = _distribution_chart(active, measure)
+    if chart:
+        charts.append(chart)
 
     return charts
