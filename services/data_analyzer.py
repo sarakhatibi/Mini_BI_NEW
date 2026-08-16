@@ -1,337 +1,254 @@
+"""Dataset profiling and data quality assessment.
+
+``analyze_dataset`` describes the structure of a dataset; ``assess_quality``
+scores it and lists the concrete problems found, including the ones the
+cleaning pipeline already repaired.
+"""
+
 import pandas as pd
 
+from services.numeric_utils import numeric_parse_ratio, parse_numeric_series
+from services.semantic_profiler import profile_dataset
 
-def analyze_dataset(df):
+ROLE_LABELS = {
+    "date": "تاریخ",
+    "measure": "عددی",
+    "percent": "درصد",
+    "category": "دسته‌بندی",
+    "identifier": "شناسه",
+    "text": "متن",
+}
 
-    # --------------------------------
-    # 0. Basic Dataset Validation
-    # --------------------------------
+SUBTYPE_LABELS = {
+    "money": "مبلغ",
+    "quantity": "مقدار",
+    "customer": "مشتری",
+    "product": "محصول",
+    "region": "منطقه",
+    "status": "وضعیت",
+    "salesperson": "فروشنده",
+    "channel": "کانال",
+    "unit": "واحد",
+    "id": "شناسه",
+}
 
-    if df is None:
-        raise ValueError(
-            "Dataset is None."
-        )
+OUTLIER_IQR_FACTOR = 3.0
 
-    if not isinstance(df, pd.DataFrame):
-        raise ValueError(
-            "Input data must be a pandas DataFrame."
-        )
 
-    if df.empty:
-        raise ValueError(
-            "Dataset is empty."
-        )
+def analyze_dataset(df: pd.DataFrame, profile=None) -> dict:
+    """Return a structural description of the dataset."""
+    if df is None or not isinstance(df, pd.DataFrame):
+        raise ValueError("Input data must be a pandas DataFrame.")
+    if df.empty or len(df.columns) == 0:
+        raise ValueError("Dataset is empty.")
 
-    if len(df.columns) == 0:
-        raise ValueError(
-            "Dataset contains no columns."
-        )
-
-    date_columns = []
-    numeric_columns = []
-    text_columns = []
-
-    # --------------------------------
-    # 1. Detect column types
-    # --------------------------------
-
-    for column in df.columns:
-        series = df[column]
-
-        if pd.api.types.is_numeric_dtype(series):
-            numeric_columns.append(column)
-
-        elif pd.api.types.is_datetime64_any_dtype(series):
-            date_columns.append(column)
-
-        elif "date" in str(column).lower():
-            converted = pd.to_datetime(
-                series,
-                errors="coerce"
-            )
-
-            if converted.notna().mean() >= 0.8:
-                date_columns.append(column)
-            else:
-                text_columns.append(column)
-
-        else:
-            text_columns.append(column)
-
-    # --------------------------------
-    # 2. Missing Values
-    # --------------------------------
+    if profile is None:
+        profile = profile_dataset(df)
 
     missing_values = df.isna().sum()
+    missing_values = missing_values[missing_values > 0]
 
-    missing_values = missing_values[
-        missing_values > 0
-    ]
-
-    # --------------------------------
-    # 3. Duplicate Rows
-    # --------------------------------
-
-    duplicate_rows = int(
-        df.duplicated().sum()
-    )
-
-    # --------------------------------
-    # 4. Type Inconsistency
-    # --------------------------------
-
-    type_issues = {}
-
+    column_summary = []
     for column in df.columns:
-
-        series = df[column]
-
-        if series.dtype == "object":
-
-            non_empty = (
-                series
-                .dropna()
-                .astype(str)
-                .str.strip()
-            )
-
-            if len(non_empty) == 0:
-                continue
-
-            numeric_converted = pd.to_numeric(
-                non_empty,
-                errors="coerce"
-            )
-
-            numeric_ratio = (
-                numeric_converted.notna().mean()
-            )
-
-            if 0.8 <= numeric_ratio < 1:
-
-                type_issues[column] = (
-                    "Mostly numeric values but some "
-                    "values are stored in a different format."
-                )
-
-    # --------------------------------
-    # 5. Unusual Values
-    # --------------------------------
-
-    unusual_values = {}
-
-    for column in numeric_columns:
-
-        series = pd.to_numeric(
-            df[column],
-            errors="coerce"
-        ).dropna()
-
-        if series.empty:
-            continue
-
-        issues = []
-
-        # Negative values
-        if (series < 0).any():
-
-            issues.append(
-                "negative values"
-            )
-
-        # Percentage-like columns
-        if any(
-            keyword in str(column).lower()
-            for keyword in [
-                "percent",
-                "percentage",
-                "discount",
-                "tax"
-            ]
-        ):
-
-            if (series > 100).any():
-
-                issues.append(
-                    "values greater than 100"
-                )
-
-        if issues:
-
-            unusual_values[column] = issues
-
-    # --------------------------------
-    # 6. Naming Irregularities
-    # --------------------------------
-
-    naming_issues = []
-
-    for column in df.columns:
-
-        column_name = str(column)
-
-        if column_name != column_name.strip():
-
-            naming_issues.append(
-                f"{column}: leading/trailing spaces"
-            )
-
-        if " " in column_name:
-
-            naming_issues.append(
-                f"{column}: contains spaces"
-            )
-
-    # --------------------------------
-    # 7. Date / Number Format Issues
-    # --------------------------------
-
-    format_issues = {}
-
-    for column in df.columns:
-
-        series = df[column].dropna()
-
-        if series.empty:
-            continue
-
-        # Convert values to string for format inspection
-        values = series.astype(str).str.strip()
-
-        # --------------------------------
-        # Numeric format detection
-        # --------------------------------
-
-        numeric_values = pd.to_numeric(
-            values,
-            errors="coerce"
+        column_profile = profile.columns[column]
+        non_null = df[column].dropna()
+        sample = non_null.iloc[0] if not non_null.empty else ""
+        column_summary.append(
+            {
+                "ستون": column,
+                "نقش": ROLE_LABELS.get(column_profile.role, column_profile.role),
+                "معنی تجاری": SUBTYPE_LABELS.get(column_profile.subtype, "—"),
+                "مقادیر یکتا": column_profile.unique_values,
+                "خالی": column_profile.missing,
+                "نمونه": str(sample)[:40],
+            }
         )
-
-        numeric_ratio = (
-            numeric_values.notna().mean()
-        )
-
-        # If most values are numeric-like,
-        # check whether some values contain
-        # symbols, units or percentage signs.
-        if numeric_ratio >= 0.8:
-
-            problematic_values = values[
-                numeric_values.isna()
-            ]
-
-            if not problematic_values.empty:
-
-                examples = (
-                    problematic_values
-                    .head(3)
-                    .tolist()
-                )
-
-                format_issues[column] = (
-                    "Inconsistent numeric format. "
-                    f"Examples: {examples}"
-                )
-
-                continue
-
-        # --------------------------------
-        # Percentage format detection
-        # --------------------------------
-
-        percent_mask = values.str.contains(
-            "%",
-            regex=False
-        )
-
-        if percent_mask.any():
-
-            without_percent = (
-                values
-                .str.replace(
-                    "%",
-                    "",
-                    regex=False
-                )
-            )
-
-            converted_percent = pd.to_numeric(
-                without_percent,
-                errors="coerce"
-            )
-
-            if converted_percent.notna().any():
-
-                if column not in format_issues:
-
-                    format_issues[column] = (
-                        "Percentage values use "
-                        "a mixed format."
-                    )
-
-        # --------------------------------
-        # Date format detection
-        # --------------------------------
-
-        if "date" in str(column).lower():
-
-            parsed_dates = pd.to_datetime(
-                values,
-                errors="coerce"
-            )
-
-            valid_ratio = (
-                parsed_dates.notna().mean()
-            )
-
-            if 0 < valid_ratio < 1:
-
-                format_issues[column] = (
-                    "Some date values use "
-                    "an inconsistent format."
-                )
-
-    # --------------------------------
-    # 8. Return Analysis
-    # --------------------------------
 
     return {
-
         "rows": len(df),
-
         "columns": len(df.columns),
+        "column_names": list(df.columns),
+        "missing_values": missing_values.to_dict(),
+        "total_missing": int(missing_values.sum()),
+        "duplicate_rows": int(df.duplicated().sum()),
+        "data_types": df.dtypes.astype(str).to_dict(),
+        "numeric_columns": profile.measure_columns + profile.percent_columns,
+        "text_columns": profile.category_columns + profile.text_columns,
+        "date_columns": profile.date_columns,
+        "identifier_columns": profile.identifier_columns,
+        "column_summary": column_summary,
+        "profile": profile,
+    }
 
-        "column_names": list(
-            df.columns
-        ),
 
-        "missing_values": (
-            missing_values.to_dict()
-        ),
+def _detect_outliers(series: pd.Series) -> int:
+    values = pd.to_numeric(series, errors="coerce").dropna()
+    if len(values) < 20:
+        return 0
+    q1, q3 = values.quantile(0.25), values.quantile(0.75)
+    iqr = q3 - q1
+    if iqr <= 0:
+        return 0
+    lower = q1 - OUTLIER_IQR_FACTOR * iqr
+    upper = q3 + OUTLIER_IQR_FACTOR * iqr
+    return int(((values < lower) | (values > upper)).sum())
 
-        "total_missing": int(
-            missing_values.sum()
-        ),
 
+def assess_quality(raw_df: pd.DataFrame, clean_df: pd.DataFrame, cleaning_result=None,
+                   profile=None) -> dict:
+    """Score data quality and list the issues found in the raw file."""
+    if profile is None:
+        profile = profile_dataset(clean_df)
+
+    issues = []
+    rows = max(len(raw_df), 1)
+
+    def _missing_severity(ratio: float) -> str:
+        if ratio > 0.2:
+            return "بالا"
+        return "متوسط" if ratio > 0.01 else "کم"
+
+    # Missing values ---------------------------------------------------
+    missing_by_column = clean_df.isna().sum()
+    total_missing = int(missing_by_column.sum())
+    total_cells = max(clean_df.size, 1)
+    for column, count in missing_by_column[missing_by_column > 0].items():
+        issues.append(
+            {
+                "ستون": column,
+                "نوع مشکل": "مقدار خالی",
+                "شدت": _missing_severity(count / rows),
+                "توضیح": f"{int(count):,} مقدار خالی ({count / rows * 100:,.1f}٪ رکوردها)",
+            }
+        )
+
+    # Duplicates --------------------------------------------------------
+    duplicate_rows = (
+        cleaning_result.duplicate_rows_removed if cleaning_result else int(raw_df.duplicated().sum())
+    )
+    if duplicate_rows:
+        issues.append(
+            {
+                "ستون": "—",
+                "نوع مشکل": "رکورد تکراری",
+                "شدت": "بالا",
+                "توضیح": f"{duplicate_rows:,} رکورد کاملاً تکراری شناسایی و حذف شد",
+            }
+        )
+
+    if cleaning_result and cleaning_result.duplicate_id_rows:
+        issues.append(
+            {
+                "ستون": profile.order_id_column or "شناسه",
+                "نوع مشکل": "شناسه تکراری",
+                "شدت": "متوسط",
+                "توضیح": (
+                    f"{cleaning_result.duplicate_id_rows:,} شناسه تکراری است؛ "
+                    "رکوردها حذف نشدند و نیاز به بررسی دارند"
+                ),
+            }
+        )
+
+    # Mixed / repaired formats -------------------------------------------
+    for column in raw_df.columns:
+        series = raw_df[column]
+        if not pd.api.types.is_object_dtype(series):
+            continue
+        if column not in clean_df.columns or not pd.api.types.is_numeric_dtype(clean_df[column]):
+            # A categorical column such as "30 روزه" is not a broken number.
+            continue
+        ratio = numeric_parse_ratio(series)
+        if 0.5 <= ratio < 1:
+            non_null = series.dropna()
+            parsed = parse_numeric_series(non_null)
+            examples = non_null[parsed.isna()].astype(str).head(3).tolist()
+            if not examples:
+                continue
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "قالب عددی ناسازگار",
+                    "شدت": "متوسط",
+                    "توضیح": f"مقادیری مانند {examples} در ستون عددی ذخیره شده‌اند",
+                }
+            )
+
+    # Rejected values ------------------------------------------------------
+    if cleaning_result:
+        for column, values in cleaning_result.rejected_values.items():
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "مقدار غیرقابل تفسیر",
+                    "شدت": "بالا",
+                    "توضیح": f"مقادیری مانند {values[:3]} قابل تبدیل نبودند و خالی در نظر گرفته شدند",
+                }
+            )
+
+    # Business rule violations ---------------------------------------------
+    for column in profile.measure_columns:
+        values = pd.to_numeric(clean_df[column], errors="coerce").dropna()
+        if values.empty:
+            continue
+        negatives = int((values < 0).sum())
+        if negatives:
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "مقدار منفی",
+                    "شدت": "بالا",
+                    "توضیح": f"{negatives:,} مقدار منفی در ستونی که انتظار عدد مثبت می‌رود",
+                }
+            )
+        outliers = _detect_outliers(values)
+        if outliers and outliers / len(values) <= 0.05:
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "مقدار پرت",
+                    "شدت": "متوسط",
+                    "توضیح": f"{outliers:,} مقدار بسیار دور از دامنه معمول (روش IQR)",
+                }
+            )
+
+    for column in profile.percent_columns:
+        values = pd.to_numeric(clean_df[column], errors="coerce").dropna()
+        invalid = int(((values < 0) | (values > 100)).sum())
+        if invalid:
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "درصد نامعتبر",
+                    "شدت": "بالا",
+                    "توضیح": f"{invalid:,} مقدار خارج از بازه ۰ تا ۱۰۰",
+                }
+            )
+
+    # Constant columns --------------------------------------------------------
+    for column in clean_df.columns:
+        if clean_df[column].dropna().nunique() == 1 and clean_df[column].notna().any():
+            issues.append(
+                {
+                    "ستون": column,
+                    "نوع مشکل": "ستون ثابت",
+                    "شدت": "کم",
+                    "توضیح": "همه رکوردها یک مقدار دارند و برای تحلیل اطلاعاتی ندارد",
+                }
+            )
+
+    # Score ---------------------------------------------------------------------
+    missing_penalty = min(total_missing / total_cells * 100, 25)
+    duplicate_penalty = min(duplicate_rows / rows * 100 * 2, 20)
+    high_severity = sum(1 for issue in issues if issue["شدت"] == "بالا")
+    medium_severity = sum(1 for issue in issues if issue["شدت"] == "متوسط")
+    issue_penalty = min(high_severity * 4 + medium_severity * 2, 35)
+    score = max(0.0, 100.0 - missing_penalty - duplicate_penalty - issue_penalty)
+
+    return {
+        "score": round(score, 1),
+        "issues": issues,
+        "total_missing": total_missing,
         "duplicate_rows": duplicate_rows,
-
-        "data_types": (
-            df.dtypes
-            .astype(str)
-            .to_dict()
-        ),
-
-        "numeric_columns": numeric_columns,
-
-        "text_columns": text_columns,
-
-        "date_columns": date_columns,
-
-        "type_issues": type_issues,
-
-        "unusual_values": unusual_values,
-
-        "naming_issues": naming_issues,
-
-        "format_issues": format_issues
+        "high_severity": high_severity,
+        "medium_severity": medium_severity,
     }
