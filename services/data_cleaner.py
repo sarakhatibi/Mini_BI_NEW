@@ -63,6 +63,7 @@ def _looks_like_date_column(name: str, series: pd.Series) -> bool:
     parsed = parse_dates(sample)
     return float(parsed.notna().mean()) >= 0.95
 
+
 def _canonicalize_categories(series: pd.Series):
     """Merge near-duplicate labels into their most frequent spelling."""
     
@@ -72,13 +73,16 @@ def _canonicalize_categories(series: pd.Series):
         "تهرانـ": "تهران",
     }
     
-    # 2. ایجاد مپینگ اولیه از اصلاحات دستی برای گزارش‌دهی به کاربر
-    mapping = {wrong: right for wrong, right in common_typos.items() if wrong in series.values}
+    # تبدیل مقادیر سری به رشته برای مقایسه و اصلاح دقیق
+    series_str = series.astype(str)
     
-    # 3. اعمال اصلاحات دستی
-    series = series.replace(common_typos)
+    # 2. ایجاد مپینگ اولیه از اصلاحات دستی بر اساس مقادیر موجود در ستون
+    mapping = {wrong: right for wrong, right in common_typos.items() if wrong in series_str.values}
+    
+    # 3. اعمال اصلاحات دستی روی مقادیر
+    series_str = series_str.replace(common_typos)
 
-    counts = series.value_counts()
+    counts = series_str.value_counts()
     if counts.empty or len(counts) > MAX_CATEGORY_CARDINALITY:
         return mapping, series
 
@@ -86,6 +90,10 @@ def _canonicalize_categories(series: pd.Series):
     
     # 4. الگوریتم هوشمند برای پیدا کردن سایر شباهت‌ها
     for label in counts.index:
+        # اگر مقداری تهی یا nan بود، از آن صرف‌نظر شود
+        if label in ("", "nan", "None", "NaN"):
+            continue
+            
         # اگر قبلاً در لیست دستی اصلاح شده، از آن بگذرد
         if label in mapping.values():
             canonical.append(label)
@@ -102,7 +110,11 @@ def _canonicalize_categories(series: pd.Series):
         else:
             mapping[label] = match
 
-    return mapping, series.replace(mapping)
+    # ترکیب مپینگ دستی و الگوریتمی برای اعمال نهایی
+    full_mapping = {**common_typos, **mapping}
+    
+    # اعمال نهایی روی سری اصلی بر اساس نوع داده اولیه
+    return full_mapping, series.replace(full_mapping)
 
 def clean_dataset(df: pd.DataFrame) -> CleaningResult:
     """Return a typed, normalized copy of ``df`` plus the decisions taken."""
@@ -273,10 +285,19 @@ def clean_dataset(df: pd.DataFrame) -> CleaningResult:
         if not pd.api.types.is_object_dtype(series):
             continue
 
-        # ارسال کل سری به جای فقط مقادیر غیرتهی
-        mapping, merged = _canonicalize_categories(series.astype(str))
+        # حفظ مقادیر تهی و تبدیل فقط بخش‌های غیرتهی به رشته
+        non_null_mask = series.notna()
+        if not non_null_mask.any():
+            continue
+
+        series_str = series.fillna("").astype(str)
+        mapping, merged_str = _canonicalize_categories(series_str)
         if not mapping:
             continue
+
+        # بازگرداندن مقادیر تهی به حالت اولیه NaN
+        merged = merged_str.replace("nan", None)
+        merged[~non_null_mask] = None
 
         data[column] = merged
         examples = ", ".join(

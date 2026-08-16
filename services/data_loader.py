@@ -46,7 +46,6 @@ def _read_csv(content: bytes) -> pd.DataFrame:
                 return frame
     raise ValueError(f"CSV file could not be parsed: {last_error}")
 
-
 def load_file(file, sheet_name=None) -> pd.DataFrame:
     """Read an uploaded CSV/Excel file into a DataFrame.
 
@@ -78,5 +77,13 @@ def load_file(file, sheet_name=None) -> pd.DataFrame:
 
     if df.empty:
         raise ValueError("فایل بارگذاری‌شده داده قابل استفاده‌ای ندارد.")
+
+    # --- اصلاح و پاک‌سازی خطاهای املایی رایج در داده‌ها ---
+    if "Province" in df.columns:
+        df["Province"] = df["Province"].replace({
+            "اصفهانن": "اصفهان",
+            "اصفهان ": "اصفهان",  # در صورت وجود فاصله اضافی
+            # اگر موارد دیگری هم داشتید اینجا اضافه کنید
+        })
 
     return df
