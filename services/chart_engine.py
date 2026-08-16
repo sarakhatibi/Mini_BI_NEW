@@ -29,10 +29,21 @@ def _active_rows(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
     if not profile.status_column or not profile.negative_statuses:
         return df
     return df[~df[profile.status_column].isin(profile.negative_statuses)]
+
+
+def _clean_text(text: str) -> str:
+    """اصلاح تداخل متون فارسی و انگلیسی جهت حفظ درست ترتیب RTL."""
+    if not text:
+        return ""
+    # استفاده از کاراکترهای کنترل RTL جهت نمایش درست ترکیب انگلیسی و فارسی
+    return f"\u202b{text}\u202c"
+
+
 def _style(figure):
+    font_family = "Vazirmatn, Tahoma, Segoe UI, Arial, sans-serif"
+
     figure.update_layout(
         margin=dict(l=20, r=20, t=75, b=20),
-
         # عنوان نمودار
         title=dict(
             x=0.5,
@@ -40,64 +51,58 @@ def _style(figure):
             y=0.96,
             yanchor="top",
             font=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=20,
+                family=font_family,
+                size=18,
                 color="#4b2026",
             ),
         ),
-
         legend_title_text="",
-
         # فونت کلی نمودار
         font=dict(
-            family="Tahoma, Segoe UI, Arial, sans-serif",
-            size=14,
+            family=font_family,
+            size=13,
             color="#5b3a3a",
         ),
-
         # پس زمینه
         paper_bgcolor="#f8f4ef",
         plot_bgcolor="#f8f4ef",
-
         # Tooltip
         hoverlabel=dict(
             namelength=-1,
             bgcolor="#fffdf9",
             bordercolor="#cdbbb0",
             font=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=14,
+                family=font_family,
+                size=13,
                 color="#3f2528",
             ),
         ),
-
         # محور افقی
         xaxis=dict(
             title_font=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=15,
+                family=font_family,
+                size=14,
                 color="#4b2026",
             ),
             tickfont=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=13,
+                family=font_family,
+                size=12,
                 color="#5b3a3a",
             ),
             gridcolor="#e8ddd5",
             zerolinecolor="#d8c8bd",
             linecolor="#d8c8bd",
         ),
-
         # محور عمودی
         yaxis=dict(
             title_font=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=15,
+                family=font_family,
+                size=14,
                 color="#4b2026",
             ),
             tickfont=dict(
-                family="Tahoma, Segoe UI, Arial, sans-serif",
-                size=13,
+                family=font_family,
+                size=12,
                 color="#5b3a3a",
             ),
             gridcolor="#e8ddd5",
@@ -107,6 +112,7 @@ def _style(figure):
     )
 
     return figure
+
 
 def _trend_chart(df: pd.DataFrame, profile: DatasetProfile, measure: str):
     date_column = profile.primary_date
@@ -134,19 +140,20 @@ def _trend_chart(df: pd.DataFrame, profile: DatasetProfile, measure: str):
     if len(grouped) < 2:
         return None
 
+    title_text = _clean_text(f"روند {measure} بر حسب {label}")
     figure = px.line(
         grouped,
         x="date",
         y="value",
         markers=True,
-        title=f"روند {measure} بر حسب {label}",
+        title=title_text,
         labels={"date": "زمان", "value": measure},
     )
     figure.update_traces(line=dict(width=3))
     return ChartSpec(
         "trend",
-        f"روند {measure}",
-        f"مجموع {measure} در هر {label}؛ برای دیدن رشد یا افت در طول زمان.",
+        _clean_text(f"روند {measure}"),
+        _clean_text(f"مجموع {measure} در هر {label}؛ برای دیدن رشد یا افت در طول زمان."),
         _style(figure),
     )
 
@@ -163,19 +170,20 @@ def _top_categories_chart(df: pd.DataFrame, dimension: str, measure: str):
     if grouped.empty:
         return None
 
+    title_text = _clean_text(f"۱۰ مورد برتر {dimension} بر اساس {measure}")
     figure = px.bar(
         grouped.sort_values("_value"),
         x="_value",
         y=dimension,
         orientation="h",
         text_auto=".2s",
-        title=f"{TOP_N} مورد برتر بر اساس {measure} در {dimension}",
+        title=title_text,
         labels={"_value": measure, dimension: dimension},
     )
     return ChartSpec(
         f"top_{dimension}",
-        f"برترین‌های {dimension}",
-        f"سهم هر {dimension} از {measure}؛ برای شناسایی تمرکز فروش.",
+        _clean_text(f"برترین‌های {dimension}"),
+        _clean_text(f"سهم هر {dimension} از {measure}؛ برای شناسایی تمرکز فروش."),
         _style(figure),
     )
 
@@ -199,18 +207,19 @@ def _share_chart(df: pd.DataFrame, dimension: str, measure: str):
         )
         grouped = pd.concat([head, others], ignore_index=True)
 
+    title_text = _clean_text(f"سهم {dimension} از {measure}")
     figure = px.pie(
         grouped,
         names=dimension,
         values="_value",
         hole=0.45,
-        title=f"سهم {dimension} از {measure}",
+        title=title_text,
     )
     figure.update_traces(textposition="inside", textinfo="percent+label")
     return ChartSpec(
         f"share_{dimension}",
-        f"سهم {dimension}",
-        f"درصد مشارکت هر {dimension} در {measure}.",
+        _clean_text(f"سهم {dimension}"),
+        _clean_text(f"درصد مشارکت هر {dimension} در {measure}."),
         _style(figure),
     )
 
@@ -220,16 +229,17 @@ def _distribution_chart(df: pd.DataFrame, measure: str):
     if values.empty or values.nunique() < 5:
         return None
 
+    title_text = _clean_text(f"توزیع {measure}")
     figure = px.histogram(
         values.to_frame(measure),
         x=measure,
         nbins=40,
-        title=f"توزیع {measure}",
+        title=title_text,
     )
     return ChartSpec(
         "distribution",
-        f"توزیع {measure}",
-        "پراکندگی مقادیر؛ برای تشخیص سفارش‌های خیلی بزرگ یا خیلی کوچک.",
+        _clean_text(f"توزیع {measure}"),
+        _clean_text("پراکندگی مقادیر؛ برای تشخیص سفارش‌های خیلی بزرگ یا خیلی کوچک."),
         _style(figure),
     )
 
@@ -241,18 +251,19 @@ def _status_chart(df: pd.DataFrame, profile: DatasetProfile):
     if counts.empty:
         return None
 
+    title_text = _clean_text(f"تعداد رکورد در هر {column}")
     figure = px.bar(
         counts,
         x=column,
         y="count",
         text_auto=True,
-        title=f"تعداد رکورد در هر {column}",
+        title=title_text,
         labels={"count": "تعداد رکورد"},
     )
     return ChartSpec(
         "status",
-        f"وضعیت {column}",
-        "ترکیب وضعیت سفارش‌ها؛ سهم لغو و مرجوعی را نشان می‌دهد.",
+        _clean_text(f"وضعیت {column}"),
+        _clean_text("ترکیب وضعیت سفارش‌ها؛ سهم لغو و مرجوعی را نشان می‌دهد."),
         _style(figure),
     )
 

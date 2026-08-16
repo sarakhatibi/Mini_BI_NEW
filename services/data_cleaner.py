@@ -16,7 +16,7 @@ from services.text_utils import normalize_column_name, normalize_text
 
 NUMERIC_CONVERSION_THRESHOLD = 0.9
 DATE_CONVERSION_THRESHOLD = 0.8
-SIMILARITY_THRESHOLD = 0.86
+SIMILARITY_THRESHOLD = 0.75
 MAX_CATEGORY_CARDINALITY = 200
 
 
@@ -63,32 +63,46 @@ def _looks_like_date_column(name: str, series: pd.Series) -> bool:
     parsed = parse_dates(sample)
     return float(parsed.notna().mean()) >= 0.95
 
-
 def _canonicalize_categories(series: pd.Series):
     """Merge near-duplicate labels into their most frequent spelling."""
+    
+    # 1. تعریف اصلاحات دستی
+    common_typos = {
+        "اصفهانن": "اصفهان",
+        "تهرانـ": "تهران",
+    }
+    
+    # 2. ایجاد مپینگ اولیه از اصلاحات دستی برای گزارش‌دهی به کاربر
+    mapping = {wrong: right for wrong, right in common_typos.items() if wrong in series.values}
+    
+    # 3. اعمال اصلاحات دستی
+    series = series.replace(common_typos)
+
     counts = series.value_counts()
     if counts.empty or len(counts) > MAX_CATEGORY_CARDINALITY:
-        return {}, series
+        return mapping, series
 
     canonical = []
-    mapping = {}
-
+    
+    # 4. الگوریتم هوشمند برای پیدا کردن سایر شباهت‌ها
     for label in counts.index:
+        # اگر قبلاً در لیست دستی اصلاح شده، از آن بگذرد
+        if label in mapping.values():
+            canonical.append(label)
+            continue
+            
         match = None
         for candidate in canonical:
             if SequenceMatcher(None, label, candidate).ratio() >= SIMILARITY_THRESHOLD:
                 match = candidate
                 break
+        
         if match is None:
             canonical.append(label)
         else:
             mapping[label] = match
 
-    if not mapping:
-        return {}, series
-
     return mapping, series.replace(mapping)
-
 
 def clean_dataset(df: pd.DataFrame) -> CleaningResult:
     """Return a typed, normalized copy of ``df`` plus the decisions taken."""
@@ -253,24 +267,18 @@ def clean_dataset(df: pd.DataFrame) -> CleaningResult:
             )
         )
 
-    # 6. Category consolidation ---------------------------------------
+# 6. Category consolidation ---------------------------------------
     for column in data.columns:
         series = data[column]
         if not pd.api.types.is_object_dtype(series):
             continue
 
-        non_null = series.dropna().astype(str)
-        if non_null.empty or non_null.nunique() > MAX_CATEGORY_CARDINALITY:
-            continue
-        if non_null.nunique() > len(non_null) * 0.5:
-            # Looks like an identifier / free text column.
-            continue
-
-        mapping, merged = _canonicalize_categories(non_null)
+        # ارسال کل سری به جای فقط مقادیر غیرتهی
+        mapping, merged = _canonicalize_categories(series.astype(str))
         if not mapping:
             continue
 
-        data.loc[merged.index, column] = merged
+        data[column] = merged
         examples = ", ".join(
             f"«{wrong}» → «{right}»" for wrong, right in list(mapping.items())[:5]
         )
@@ -279,7 +287,7 @@ def clean_dataset(df: pd.DataFrame) -> CleaningResult:
                 column=column,
                 action="ادغام مقادیر مشابه",
                 detail=f"مقادیر با املای نزدیک یکی شدند: {examples}",
-                affected_rows=int(non_null.isin(mapping).sum()),
+                affected_rows=int(series.isin(mapping).sum()),
             )
         )
 

@@ -197,8 +197,8 @@ def generate_insights(df: pd.DataFrame, kpi_result: KpiResult = None,
         if len(grouped) >= 2:
             insights.append(
                 Insight(
-                    f"بیشترین فروش از «{grouped.index[0]}» ({_money(float(grouped.iloc[0]))}) و "
-                    f"کمترین از «{grouped.index[-1]}» ({_money(float(grouped.iloc[-1]))}) به دست آمده است.",
+                    f'بیشترین فروش از «{grouped.index[0]}» (<span dir="ltr">{_money(float(grouped.iloc[0]))}</span>) و '
+                    f'کمترین فروش از «{grouped.index[-1]}» (<span dir="ltr">{_money(float(grouped.iloc[-1]))}</span>) به دست آمده است.',
                     "info",
                 )
             )
