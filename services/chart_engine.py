@@ -29,17 +29,84 @@ def _active_rows(df: pd.DataFrame, profile: DatasetProfile) -> pd.DataFrame:
     if not profile.status_column or not profile.negative_statuses:
         return df
     return df[~df[profile.status_column].isin(profile.negative_statuses)]
-
-
 def _style(figure):
     figure.update_layout(
-        margin=dict(l=10, r=10, t=60, b=10),
-        title_x=0.5,
-        legend_title_text="",
-        hoverlabel=dict(namelength=-1),
-    )
-    return figure
+        margin=dict(l=20, r=20, t=75, b=20),
 
+        # عنوان نمودار
+        title=dict(
+            x=0.5,
+            xanchor="center",
+            y=0.96,
+            yanchor="top",
+            font=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=20,
+                color="#4b2026",
+            ),
+        ),
+
+        legend_title_text="",
+
+        # فونت کلی نمودار
+        font=dict(
+            family="Tahoma, Segoe UI, Arial, sans-serif",
+            size=14,
+            color="#5b3a3a",
+        ),
+
+        # پس زمینه
+        paper_bgcolor="#f8f4ef",
+        plot_bgcolor="#f8f4ef",
+
+        # Tooltip
+        hoverlabel=dict(
+            namelength=-1,
+            bgcolor="#fffdf9",
+            bordercolor="#cdbbb0",
+            font=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=14,
+                color="#3f2528",
+            ),
+        ),
+
+        # محور افقی
+        xaxis=dict(
+            title_font=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=15,
+                color="#4b2026",
+            ),
+            tickfont=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=13,
+                color="#5b3a3a",
+            ),
+            gridcolor="#e8ddd5",
+            zerolinecolor="#d8c8bd",
+            linecolor="#d8c8bd",
+        ),
+
+        # محور عمودی
+        yaxis=dict(
+            title_font=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=15,
+                color="#4b2026",
+            ),
+            tickfont=dict(
+                family="Tahoma, Segoe UI, Arial, sans-serif",
+                size=13,
+                color="#5b3a3a",
+            ),
+            gridcolor="#e8ddd5",
+            zerolinecolor="#d8c8bd",
+            linecolor="#d8c8bd",
+        ),
+    )
+
+    return figure
 
 def _trend_chart(df: pd.DataFrame, profile: DatasetProfile, measure: str):
     date_column = profile.primary_date
